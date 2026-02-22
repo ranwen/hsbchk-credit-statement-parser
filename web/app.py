@@ -182,14 +182,20 @@ def has_scope_match(
     )
 
 
-def can_read_statement(user: User, statement: Statement) -> bool:
+def has_full_statement_access(user: User, statement: Statement) -> bool:
     if user.role == "admin":
+        return True
+    return statement.statement_product in user.read_scope.statement_products
+
+
+def can_see_statement_in_list(user: User, statement: Statement) -> bool:
+    if user.role == "admin":
+        return True
+    if statement.statement_product in user.read_scope.statement_products:
         return True
     accounts = set(json.loads(statement.account_numbers_json))
     cards = set(json.loads(statement.card_numbers_json))
 
-    if statement.statement_product in user.read_scope.statement_products:
-        return True
     if accounts.intersection(user.read_scope.account_numbers):
         return True
     if cards.intersection(user.read_scope.card_numbers):
@@ -483,8 +489,9 @@ def create_app() -> FastAPI:
         rows = db.scalars(select(Statement).order_by(Statement.id.desc())).all()
         visible: List[dict] = []
         for st in rows:
-            if not can_read_statement(user, st):
+            if not can_see_statement_in_list(user, st):
                 continue
+            has_full = has_full_statement_access(user, st)
             visible.append(
                 {
                     "id": st.id,
@@ -493,6 +500,10 @@ def create_app() -> FastAPI:
                     "statement_product": st.statement_product,
                     "uploaded_at": st.uploaded_at.isoformat(),
                     "uploaded_by": st.uploaded_by,
+                    "can_view_raw": has_full,
+                    "can_view_pdf": has_full,
+                    "can_view_tx": True,
+                    "can_view_summary": True,
                 }
             )
 
@@ -518,7 +529,7 @@ def create_app() -> FastAPI:
         st = db.get(Statement, statement_id)
         if not st:
             raise HTTPException(status_code=404, detail="statement not found")
-        if not can_read_statement(user, st):
+        if not has_full_statement_access(user, st):
             raise HTTPException(status_code=403, detail="forbidden")
 
         parsed = json.loads(st.parsed_json)
@@ -541,7 +552,7 @@ def create_app() -> FastAPI:
         st = db.get(Statement, statement_id)
         if not st:
             raise HTTPException(status_code=404, detail="statement not found")
-        if not can_read_statement(user, st):
+        if not has_full_statement_access(user, st):
             raise HTTPException(status_code=403, detail="forbidden")
         path = Path(st.stored_path)
         if not path.exists():
@@ -749,7 +760,7 @@ def create_app() -> FastAPI:
             for _, item in sorted(card_map.items(), key=lambda kv: (kv[0][0], kv[0][1]))
         ]
 
-        show_stmt_meta = can_read_statement(user, st)
+        show_stmt_meta = can_see_statement_in_list(user, st)
         return {
             "statement_id": st.id,
             "statement_date": st.statement_date if show_stmt_meta else None,

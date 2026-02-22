@@ -294,18 +294,27 @@ async function loadStatements() {
   const resp = await api(`api/statements?limit=${PAGE_SIZE}&offset=${state.stOffset}`);
   const rows = Array.isArray(resp) ? resp : resp.items || [];
   for (const row of rows) {
+    const actions = [];
+    if (row.can_view_raw !== false) {
+      actions.push(`<button class="small" data-action="viewraw" data-id="${row.id}">View Raw</button>`);
+    }
+    if (row.can_view_tx !== false) {
+      actions.push(`<button class="small" data-action="viewtx" data-id="${row.id}">View Tx</button>`);
+    }
+    if (row.can_view_summary !== false) {
+      actions.push(`<button class="small" data-action="viewsummary" data-id="${row.id}">View Summary</button>`);
+    }
+    if (row.can_view_pdf !== false) {
+      actions.push(`<button class="small" data-action="pdf" data-id="${row.id}">PDF</button>`);
+    }
+
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td>${row.id}</td>
       <td>${row.statement_date}</td>
       <td>${row.statement_product}</td>
       <td>${row.original_filename}</td>
-      <td>
-        <button class="small" data-action="viewraw" data-id="${row.id}">View Raw</button>
-        <button class="small" data-action="viewtx" data-id="${row.id}">View Tx</button>
-        <button class="small" data-action="viewsummary" data-id="${row.id}">View Summary</button>
-        <button class="small" data-action="pdf" data-id="${row.id}">PDF</button>
-      </td>
+      <td>${actions.join(" ")}</td>
     `;
     els.statementsBody.appendChild(tr);
   }

@@ -230,7 +230,7 @@ async function login() {
   }
 
   try {
-    const data = await api("/api/login", {
+    const data = await api("api/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ token: state.token }),
@@ -291,7 +291,7 @@ async function loadStatements() {
   els.statementDetail.textContent = "";
   els.statementsBody.innerHTML = "";
 
-  const resp = await api(`/api/statements?limit=${PAGE_SIZE}&offset=${state.stOffset}`);
+  const resp = await api(`api/statements?limit=${PAGE_SIZE}&offset=${state.stOffset}`);
   const rows = Array.isArray(resp) ? resp : resp.items || [];
   for (const row of rows) {
     const tr = document.createElement("tr");
@@ -315,7 +315,7 @@ async function loadStatements() {
       const id = btn.getAttribute("data-id");
       const action = btn.getAttribute("data-action");
       if (action === "viewraw") {
-        const detail = await api(`/api/statements/${id}`);
+        const detail = await api(`api/statements/${id}`);
         els.statementDetail.textContent = JSON.stringify(detail, null, 2);
       } else if (action === "viewtx") {
         state.txOffset = 0;
@@ -335,7 +335,7 @@ async function loadStatements() {
         writeViewStateToUrl();
         await loadSummary();
       } else if (action === "pdf") {
-        const resp = await api(`/api/statements/${id}/file`);
+        const resp = await api(`api/statements/${id}/file`);
         const blob = await resp.blob();
         const url = URL.createObjectURL(blob);
         window.open(url, "_blank", "noopener,noreferrer");
@@ -377,7 +377,7 @@ async function loadTransactions() {
   params.push(`limit=${PAGE_SIZE}`);
   params.push(`offset=${state.txOffset}`);
 
-  const resp = await api(`/api/transactions?${params.join("&")}`);
+  const resp = await api(`api/transactions?${params.join("&")}`);
   const rows = Array.isArray(resp) ? resp : resp.items || [];
   for (const tx of rows) {
     const tr = document.createElement("tr");
@@ -423,7 +423,7 @@ async function loadSummary() {
     return;
   }
 
-  const data = await api(`/api/statement_summary?statement_id=${q(statementId)}`);
+  const data = await api(`api/statement_summary?statement_id=${q(statementId)}`);
   setSummaryMessage("", false);
 
   const headParts = [`Statement #${data.statement_id}`];
@@ -484,7 +484,7 @@ async function uploadStatement() {
   form.append("file", file);
 
   try {
-    const data = await api("/api/statements/upload", {
+    const data = await api("api/statements/upload", {
       method: "POST",
       body: form,
     });

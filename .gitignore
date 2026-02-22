@@ -21,6 +21,8 @@ env/
 *.pem
 *.key
 *.p12
+web/config.json
+web/data/
 
 # Editor / OS
 .DS_Store

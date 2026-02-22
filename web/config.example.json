@@ -1,0 +1,32 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8000,
+    "cors_origins": ["*"]
+  },
+  "database": {
+    "sqlite_path": "web/data/app.db"
+  },
+  "storage": {
+    "upload_dir": "web/data/uploads"
+  },
+  "users": [
+    {
+      "username": "admin",
+      "token": "CHANGE_ME_ADMIN_TOKEN",
+      "role": "admin"
+    },
+    {
+      "username": "reader",
+      "token": "CHANGE_ME_READER_TOKEN",
+      "role": "user",
+      "permissions": {
+        "read": [
+          { "type": "statement_product", "value": "EXAMPLE_STATEMENT_PRODUCT" },
+          { "type": "account_number", "value": "EXAMPLE_ACCOUNT_NUMBER" },
+          { "type": "card_number", "value": "EXAMPLE_CARD_NUMBER" }
+        ]
+      }
+    }
+  ]
+}

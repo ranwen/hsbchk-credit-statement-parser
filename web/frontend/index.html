@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Statement Management</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="container">
+      <header class="header">
+        <h1>Statement Management</h1>
+        <p>Token-based access for statements and transactions.</p>
+      </header>
+
+      <section class="panel" id="login-panel">
+        <h2>Login</h2>
+        <label>
+          Token
+          <input id="token-input" type="text" placeholder="paste token" />
+        </label>
+        <button id="login-btn">Login</button>
+        <p id="login-msg" class="msg"></p>
+      </section>
+
+      <section class="panel hidden" id="app-panel">
+        <div class="row between">
+          <div>
+            <strong id="user-line"></strong>
+          </div>
+          <div class="row">
+            <button id="copy-link-btn" class="secondary" type="button">Copy Login Link</button>
+            <button id="logout-btn" class="secondary">Logout</button>
+          </div>
+        </div>
+        <p id="app-msg" class="msg"></p>
+
+        <div class="tabs">
+          <button data-tab="statements" class="tab active">Statements</button>
+          <button data-tab="transactions" class="tab">Transactions</button>
+          <button data-tab="summary" class="tab">Summary</button>
+          <button data-tab="upload" class="tab" id="upload-tab">Upload</button>
+        </div>
+
+        <section id="tab-statements" class="tab-content">
+          <h3>Statements</h3>
+          <div class="row pager">
+            <button id="st-prev" class="secondary" type="button">Prev</button>
+            <span id="st-page-info"></span>
+            <button id="st-next" class="secondary" type="button">Next</button>
+          </div>
+          <table id="statements-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Date</th>
+                <th>Product</th>
+                <th>File</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+          <h4>Statement Detail</h4>
+          <pre id="statement-detail"></pre>
+        </section>
+
+        <section id="tab-transactions" class="tab-content hidden">
+          <div class="filters-strip-wrap">
+            <div class="filters-strip filters-strip-primary">
+              <label class="w-xs">Statement ID <input id="tx-statement-id" type="number" /></label>
+              <label class="w-md">Statement Product <input id="tx-statement-product" type="text" /></label>
+              <label class="w-card">Card Number <input id="tx-card" type="text" /></label>
+              <label class="w-holder">Cardholder <input id="tx-cardholder" type="text" /></label>
+            </div>
+            <div class="filters-strip filters-strip-secondary">
+              <label class="w-date">Date From <input id="tx-date-from" type="date" /></label>
+              <label class="w-date">Date To <input id="tx-date-to" type="date" /></label>
+              <label class="w-lg">Description Keyword <input id="tx-search" type="text" /></label>
+              <div class="filter-actions">
+                <button id="refresh-transactions">Apply Filters</button>
+              </div>
+            </div>
+          </div>
+          <div class="row pager">
+            <button id="tx-prev" class="secondary" type="button">Prev</button>
+            <span id="tx-page-info"></span>
+            <button id="tx-next" class="secondary" type="button">Next</button>
+          </div>
+          <table id="transactions-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Statement</th>
+                <th>Post Date</th>
+                <th>Description</th>
+                <th>Signed (Acct Ccy)</th>
+                <th>Currency</th>
+                <th>Payment</th>
+                <th>Card</th>
+                <th>Cardholder</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </section>
+
+        <section id="tab-summary" class="tab-content hidden">
+          <div class="row summary-toolbar">
+            <label class="w-xs">Statement ID <input id="summary-statement-id" type="number" /></label>
+            <button id="refresh-summary">View Summary</button>
+          </div>
+          <p id="summary-msg" class="msg"></p>
+          <div id="summary-head" class="summary-head"></div>
+          <h4>By Account</h4>
+          <table id="summary-accounts-table">
+            <thead>
+              <tr>
+                <th>Account</th>
+                <th>Currency</th>
+                <th>Spend</th>
+                <th>Refund</th>
+                <th>Net Spend</th>
+                <th>Payment</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+          <h4>By Card</h4>
+          <table id="summary-cards-table">
+            <thead>
+              <tr>
+                <th>Account</th>
+                <th>Card</th>
+                <th>Cardholder</th>
+                <th>Currency</th>
+                <th>Spend</th>
+                <th>Refund</th>
+                <th>Net Spend</th>
+                <th>Payment</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </section>
+
+        <section id="tab-upload" class="tab-content hidden">
+          <h3>Upload Statement (Admin)</h3>
+          <input id="upload-file" type="file" accept="application/pdf" />
+          <button id="upload-btn">Upload</button>
+          <p id="upload-msg" class="msg"></p>
+        </section>
+      </section>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

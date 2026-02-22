@@ -5,7 +5,7 @@ It extracts statement data into structured JSON for downstream processing.
 
 ## AI Authorship Notice
 
-This codebase was 100% written by AI.
+**This codebase was 100% written by AI.**
 You should treat outputs as machine-generated and perform human review before using in production, accounting, compliance, or legal workflows.
 
 ## What It Does
@@ -70,8 +70,8 @@ except ParseError as e:
 
 ```json
 {
-  "statement_product": "PULSE DUALCURRENCY",
-  "statement_date": "2026-02-10",
+  "statement_product": "EXAMPLE_STATEMENT_PRODUCT",
+  "statement_date": "YYYY-MM-DD",
   "sub_accounts": [
     {
       "account_number": "...",

@@ -1,0 +1,53 @@
+# Python cache/build
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local secrets/config
+.env
+.env.*
+*.pem
+*.key
+*.p12
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# --- Sensitive financial data (default deny) ---
+# Raw statements (often contain full name, address, account/card info)
+*.pdf
+*.PDF
+*.jpg
+*.jpeg
+*.png
+*.tif
+*.tiff
+
+# Parsed/derived statement exports
+output*.json
+export*.json
+parsed*.json
+statement*.json
+*_statement*.json
+*.csv
+*.xlsx
+
+# Tests may include real statement data / personal info
+tests/
+
+# Keep this file tracked
+!.gitignore

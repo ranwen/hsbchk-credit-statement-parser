@@ -43,8 +43,10 @@ This is to prevent silent mis-parsing.
 Python 3.10+ recommended.
 
 ```bash
-python3 -m pip install pypdf
+python3 -m pip install pypdf==5.9.0
 ```
+
+Important: use `pypdf==5.9.0`. Newer versions may fail or hang on some HSBC statement templates.
 
 ## CLI Usage
 

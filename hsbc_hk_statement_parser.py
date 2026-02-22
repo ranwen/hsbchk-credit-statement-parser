@@ -68,6 +68,7 @@ PLAIN_AMOUNT_RE = re.compile(r"^[0-9][0-9,]*\.\d{2}$")
 ALPHA2_RE = re.compile(r"^[A-Z]{2}$")
 ALPHA3_RE = re.compile(r"^[A-Z]{3}$")
 EXCHANGE_RATE_RE = re.compile(r"^\*EXCHANGE\s*RATE:\s*([0-9]+(?:\.[0-9]+)?)$", re.IGNORECASE)
+HEADER_DATE_TOKEN_RE = re.compile(r"(\d{2})\s*([A-Z]{3})\s*(\d{4})", re.IGNORECASE)
 
 
 class ParseError(RuntimeError):
@@ -208,20 +209,25 @@ def extract_unique_card_numbers(page_text: str) -> Set[str]:
     return {to_card_number(m.group(0)) for m in CARD_NUMBER_ANYWHERE_RE.finditer(page_text)}
 
 
+def normalize_statement_product(raw: str) -> str:
+    product = squeeze_ws(raw).upper()
+    # Some plain-text extracts collapse spaces in known suffixes.
+    product = re.sub(r"(?<!\s)(DUALCURRENCY)\b", r" \1", product)
+    product = re.sub(r"(?<!\s)(CREDITCARD)\b", r" CREDIT CARD", product)
+    product = re.sub(r"\s+", " ", product).strip()
+    return product
+
+
 def infer_statement_product(reader: PdfReader) -> str:
     for page in reader.pages:
         plain_text = page.extract_text() or ""
-        layout_text = page.extract_text(extraction_mode="layout") or ""
         plain_lines = [squeeze_ws(ln) for ln in plain_text.splitlines() if squeeze_ws(ln)]
-        layout_lines = [squeeze_ws(ln) for ln in layout_text.splitlines() if squeeze_ws(ln)]
-        all_lines = layout_lines + plain_lines
-
-        for idx, line in enumerate(all_lines):
+        for idx, line in enumerate(plain_lines):
             normalized = line.upper().replace(" ", "")
             if normalized not in {"CARDTYPE", "CARDTYPECREDITLIMIT"} and "CARDTYPE" not in normalized:
                 continue
-            for j in range(idx + 1, min(idx + 8, len(all_lines))):
-                candidate = all_lines[j]
+            for j in range(idx + 1, min(idx + 8, len(plain_lines))):
+                candidate = plain_lines[j]
                 upper = candidate.upper()
                 if any(
                     bad in upper
@@ -237,11 +243,15 @@ def infer_statement_product(reader: PdfReader) -> str:
                     continue
                 m_amount = re.match(r"^([A-Z][A-Z0-9 &/-]{2,}?)\s*HKD[0-9,]+\.\d{2}\*?$", candidate)
                 if m_amount:
-                    return squeeze_ws(m_amount.group(1))
-                m_code = re.match(r"^(?:\d{3,}\s+)?([A-Z][A-Z0-9 &/-]{2,})$", candidate)
+                    return normalize_statement_product(m_amount.group(1))
+                m_code = re.match(r"^(?:\d{8,}\s+)?([A-Z][A-Z0-9 &/-]{2,})$", upper)
                 if m_code:
-                    product = squeeze_ws(m_code.group(1))
-                    if product not in {"O", "CHINA"}:
+                    product = normalize_statement_product(m_code.group(1))
+                    if (
+                        product not in {"O", "CHINA"}
+                        and not any(ch.isdigit() for ch in product)
+                        and len(product.split()) <= 5
+                    ):
                         return product
 
     raise ParseError("Could not infer statement product from PDF")
@@ -285,6 +295,32 @@ def set_once_or_same(current: Optional[Decimal], new: Decimal, label: str, conte
             f"Conflicting {label}: existing {money_to_json(current)} vs {money_to_json(new)} at {context}"
         )
     return current
+
+
+def extract_header_statement_date(layout_text: str, plain_text: str) -> Optional[Tuple[str, str, str]]:
+    """Extract statement date from title/header region (supports 12JAN2026 or 12 JAN 2026)."""
+
+    def from_lines(raw_lines: List[str]) -> Optional[Tuple[str, str, str]]:
+        lines = [squeeze_ws(ln) for ln in raw_lines if squeeze_ws(ln)]
+        # Limit to top section to reduce false-positive dates in body text.
+        top = lines[:80]
+        for idx, line in enumerate(top):
+            normalized = re.sub(r"\s+", "", line).upper()
+            if "STATEMENTDATE" not in normalized:
+                continue
+            window = top[idx : min(idx + 4, len(top))]
+            for candidate in window:
+                m = HEADER_DATE_TOKEN_RE.search(candidate.upper())
+                if m:
+                    day, mon, year = m.groups()
+                    return day, mon, year
+        return None
+
+    # Prefer layout lines (better header geometry), then fallback to plain.
+    got = from_lines(layout_text.splitlines())
+    if got is not None:
+        return got
+    return from_lines(plain_text.splitlines())
 
 
 def parse_statement(pdf_path: Path) -> dict:
@@ -353,22 +389,35 @@ def parse_statement(pdf_path: Path) -> dict:
         return existing
 
     for page_idx, page in enumerate(reader.pages, start=1):
-        text = page.extract_text(extraction_mode="layout") or ""
-        lines = text.splitlines()
-        compact = squeeze_ws(text)
+        # Keep body parsing on layout extraction for stable transaction rows.
+        text_layout = page.extract_text(extraction_mode="layout") or ""
+        # Header/title region is often more reliable with non-layout extraction.
+        text_plain = page.extract_text() or ""
+
+        text = text_layout
+        lines = text_layout.splitlines() if text_layout else text_plain.splitlines()
+        compact_layout = squeeze_ws(text_layout)
+        compact_plain = squeeze_ws(text_plain)
         context = f"page {page_idx}"
 
-        date_match = STATEMENT_DATE_RE.search(compact)
+        # For statement date, prefer plain extraction to avoid layout column interleaving.
+        date_match = STATEMENT_DATE_RE.search(compact_plain) or STATEMENT_DATE_RE.search(compact_layout)
         if date_match:
             d, mon_txt, y = date_match.groups()
             record_statement_date(d, mon_txt, y, context)
+        elif statement_date_global is None:
+            header_date = extract_header_statement_date(layout_text=text_layout, plain_text=text_plain)
+            if header_date is not None:
+                d, mon_txt, y = header_date
+                record_statement_date(d, mon_txt, y, context)
 
-        page_amount_match = AMOUNT_HEADER_RE.search(compact)
+        page_amount_match = AMOUNT_HEADER_RE.search(compact_plain) or AMOUNT_HEADER_RE.search(compact_layout)
         page_amount_currency = (
             normalize_currency(page_amount_match.group(1), context) if page_amount_match else None
         )
 
-        header_match = ACCOUNT_HEADER_RE.search(compact)
+        # Header summary blocks are also from title region; plain extraction first.
+        header_match = ACCOUNT_HEADER_RE.search(compact_plain) or ACCOUNT_HEADER_RE.search(compact_layout)
         if header_match:
             raw_account, sub_ccy_raw, amount_ccy_raw, stmt_balance_raw = header_match.groups()
             account_number = to_card_number(raw_account)
@@ -398,7 +447,11 @@ def parse_statement(pdf_path: Path) -> dict:
             continue
 
         page_accounts = extract_unique_card_numbers(text)
-        single_balance_match = SINGLE_BALANCE_RE.search(compact)
+        if not page_accounts:
+            page_accounts = extract_unique_card_numbers(text_plain)
+        single_balance_match = SINGLE_BALANCE_RE.search(compact_plain) or SINGLE_BALANCE_RE.search(
+            compact_layout
+        )
         if single_balance_match:
             d, mon_txt, y, amount_ccy_raw, stmt_balance_raw = single_balance_match.groups()
             record_statement_date(d, mon_txt, y, context)
@@ -851,4 +904,3 @@ def sub_account_to_json(account: SubAccount) -> dict:
         },
         "cards": cards,
     }
-

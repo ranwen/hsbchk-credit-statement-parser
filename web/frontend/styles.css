@@ -77,6 +77,10 @@ button.secondary {
   background: #5e6a75;
 }
 
+button.danger {
+  background: #b42318;
+}
+
 button.small {
   padding: 4px 8px;
   font-size: 12px;
@@ -243,6 +247,30 @@ pre {
 .msg {
   color: #b42318;
   min-height: 20px;
+}
+
+.muted-note {
+  margin: 6px 0 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.admin-divider {
+  height: 1px;
+  margin: 18px 0;
+  background: var(--line);
+}
+
+.status-panel {
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #f7fafc;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  min-height: 96px;
+  font-size: 13px;
+  color: #22303d;
 }
 
 .pager {

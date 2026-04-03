@@ -149,6 +149,19 @@
           <input id="upload-file" type="file" accept="application/pdf" />
           <button id="upload-btn">Upload</button>
           <p id="upload-msg" class="msg"></p>
+
+          <div class="admin-divider"></div>
+
+          <h3>Rebuild Parsed Data (Admin)</h3>
+          <p class="muted-note">
+            Keep uploaded raw PDFs and upload metadata, then rebuild parsed statement fields and all transactions in the background.
+          </p>
+          <div class="row wrap">
+            <button id="rebuild-db-btn" class="danger" type="button">Rebuild Database</button>
+            <button id="refresh-rebuild-status-btn" class="secondary" type="button">Refresh Status</button>
+          </div>
+          <p id="rebuild-db-msg" class="msg"></p>
+          <div id="rebuild-db-status" class="status-panel"></div>
         </section>
       </section>
     </main>

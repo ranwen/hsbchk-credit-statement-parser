@@ -55,6 +55,8 @@ Base path: `/api`
 - `POST /api/login` token login
 - `GET /api/me`
 - `POST /api/statements/upload` (admin only)
+- `GET /api/admin/rebuild_database` (admin only, current rebuild status)
+- `POST /api/admin/rebuild_database` (admin only, start async rebuild)
 - `GET /api/statements`
 - `GET /api/statements/{statement_id}`
 - `GET /api/statements/{statement_id}/file`
@@ -75,6 +77,14 @@ Only two tables are used:
 - `transactions`
 
 No extra middle tables for accounts/cards are used.
+
+Admin rebuild:
+
+- Keeps uploaded raw PDF files and statement row identities such as `id`, `original_filename`, `stored_path`, `uploaded_at`, `uploaded_by`
+- Re-parses every stored PDF in the background
+- Rewrites derived statement fields such as `statement_date`, `statement_product`, `account_numbers_json`, `card_numbers_json`, `parsed_json`
+- Deletes and rebuilds the entire `transactions` table from the freshly parsed statements
+- If any stored PDF is missing or any re-parse fails, the rebuild job is marked failed and the old DB contents stay unchanged
 
 ## Run
 

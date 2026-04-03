@@ -74,6 +74,8 @@ const state = {
   txOffset: 0,
   stHasMore: false,
   txHasMore: false,
+  rebuildStatus: null,
+  rebuildPollTimer: null,
 };
 
 const els = {
@@ -113,6 +115,10 @@ const els = {
   uploadFile: document.getElementById("upload-file"),
   uploadBtn: document.getElementById("upload-btn"),
   uploadMsg: document.getElementById("upload-msg"),
+  rebuildDbBtn: document.getElementById("rebuild-db-btn"),
+  refreshRebuildStatusBtn: document.getElementById("refresh-rebuild-status-btn"),
+  rebuildDbMsg: document.getElementById("rebuild-db-msg"),
+  rebuildDbStatus: document.getElementById("rebuild-db-status"),
 };
 
 els.tokenInput.value = state.token;
@@ -132,9 +138,104 @@ function setAppMessage(msg, isError = true) {
   els.appMsg.textContent = msg;
 }
 
+function setRebuildMessage(msg, isError = true) {
+  els.rebuildDbMsg.style.color = isError ? "#b42318" : "#027a48";
+  els.rebuildDbMsg.textContent = msg;
+}
+
 function setSummaryMessage(msg, isError = true) {
   els.summaryMsg.style.color = isError ? "#b42318" : "#027a48";
   els.summaryMsg.textContent = msg;
+}
+
+function stopRebuildPolling() {
+  if (state.rebuildPollTimer) {
+    window.clearInterval(state.rebuildPollTimer);
+    state.rebuildPollTimer = null;
+  }
+}
+
+function startRebuildPolling() {
+  stopRebuildPolling();
+  state.rebuildPollTimer = window.setInterval(() => {
+    loadRebuildStatus(true).catch((e) => setRebuildMessage(e.message));
+  }, 3000);
+}
+
+function formatIsoDateTime(raw) {
+  if (!raw) return "";
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return raw;
+  return d.toLocaleString();
+}
+
+function renderRebuildStatus(status) {
+  state.rebuildStatus = status || null;
+  const s = status || {};
+  const lines = [];
+
+  lines.push(`State: ${s.state || "idle"}`);
+  if (s.phase) lines.push(`Phase: ${s.phase}`);
+  if (s.job_id) lines.push(`Job ID: ${s.job_id}`);
+  if (s.requested_by) lines.push(`Requested By: ${s.requested_by}`);
+  if (s.started_at) lines.push(`Started At: ${formatIsoDateTime(s.started_at)}`);
+  if (s.finished_at) lines.push(`Finished At: ${formatIsoDateTime(s.finished_at)}`);
+  if (Number.isFinite(Number(s.total_statements)) && Number(s.total_statements) > 0) {
+    lines.push(`Progress: ${Number(s.processed_statements || 0)} / ${Number(s.total_statements)} statements`);
+  }
+  if (s.current_statement_id || s.current_filename) {
+    lines.push(
+      `Current: #${s.current_statement_id || "-"} ${s.current_filename || ""}`.trim()
+    );
+  }
+  if (s.statements_rebuilt || s.transactions_rebuilt) {
+    lines.push(
+      `Result: ${Number(s.statements_rebuilt || 0)} statements, ${Number(s.transactions_rebuilt || 0)} transactions`
+    );
+  }
+  if (s.message) lines.push(`Message: ${s.message}`);
+  if (s.error) lines.push(`Error: ${s.error}`);
+
+  els.rebuildDbStatus.textContent = lines.join("\n");
+  const isRunning = s.state === "running";
+  els.rebuildDbBtn.disabled = isRunning;
+}
+
+async function loadRebuildStatus(silent = false) {
+  if (state.role !== "admin") {
+    stopRebuildPolling();
+    return;
+  }
+
+  try {
+    const status = await api("api/admin/rebuild_database");
+    const previousState = state.rebuildStatus && state.rebuildStatus.state;
+    renderRebuildStatus(status);
+
+    if (status.state === "running") {
+      startRebuildPolling();
+    } else {
+      stopRebuildPolling();
+      if (previousState === "running" && status.state === "completed") {
+        await Promise.all([loadStatements(), loadTransactions()]);
+        if (state.action === "summary" && els.summaryStatementId.value.trim()) {
+          await loadSummary();
+        }
+        setRebuildMessage(status.message || "Database rebuild completed", false);
+      } else if (previousState === "running" && status.state === "failed") {
+        setRebuildMessage(status.error || status.message || "Database rebuild failed");
+      } else if (!silent) {
+        setRebuildMessage("", false);
+      }
+    }
+  } catch (err) {
+    stopRebuildPolling();
+    if (!silent) {
+      setRebuildMessage(String(err.message || err));
+    } else {
+      throw err;
+    }
+  }
 }
 
 function buildLoginLinkFromInput() {
@@ -252,6 +353,12 @@ async function login() {
     writeViewStateToUrl();
 
     await Promise.all([loadStatements(), loadTransactions()]);
+    if (state.role === "admin") {
+      await loadRebuildStatus();
+    } else {
+      stopRebuildPolling();
+      renderRebuildStatus({ state: "idle", phase: "idle" });
+    }
     if (state.action === "summary") {
       await loadSummary();
     }
@@ -261,12 +368,16 @@ async function login() {
 }
 
 function logout() {
+  stopRebuildPolling();
   localStorage.removeItem("token");
   state.token = "";
   state.role = null;
   state.username = null;
+  state.rebuildStatus = null;
   els.tokenInput.value = "";
   setAppMessage("");
+  setRebuildMessage("");
+  renderRebuildStatus({ state: "idle", phase: "idle" });
   els.appPanel.classList.add("hidden");
   els.loginPanel.classList.remove("hidden");
 }
@@ -504,6 +615,32 @@ async function uploadStatement() {
   }
 }
 
+async function rebuildDatabase() {
+  const firstConfirm = window.confirm(
+    "This will keep the uploaded raw PDFs and upload metadata, then rebuild all parsed statement data and transactions. Continue?"
+  );
+  if (!firstConfirm) {
+    return;
+  }
+
+  const secondConfirm = window.prompt('Type REBUILD to confirm database rebuild.');
+  if (secondConfirm !== "REBUILD") {
+    setRebuildMessage("Database rebuild cancelled");
+    return;
+  }
+
+  try {
+    const status = await api("api/admin/rebuild_database", {
+      method: "POST",
+    });
+    renderRebuildStatus(status);
+    startRebuildPolling();
+    setRebuildMessage("Database rebuild started in background", false);
+  } catch (err) {
+    setRebuildMessage(String(err.message || err));
+  }
+}
+
 function setActiveTab(action) {
   const normalized = ["statements", "transactions", "summary", "upload"].includes(action)
     ? action
@@ -574,6 +711,10 @@ els.refreshTransactions.addEventListener("click", () => {
   loadTransactions().catch((e) => setLoginMessage(e.message));
 });
 els.uploadBtn.addEventListener("click", uploadStatement);
+els.rebuildDbBtn.addEventListener("click", rebuildDatabase);
+els.refreshRebuildStatusBtn.addEventListener("click", () => {
+  loadRebuildStatus().catch((e) => setRebuildMessage(e.message));
+});
 
 const initialView = readViewStateFromUrl();
 state.action = initialView.action;

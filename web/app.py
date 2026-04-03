@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -22,6 +23,7 @@ from sqlalchemy import (
     String,
     Text,
     create_engine,
+    delete,
     or_,
     select,
     text,
@@ -106,6 +108,16 @@ class User:
 
 class LoginRequest(BaseModel):
     token: str
+
+
+@dataclass(frozen=True)
+class ParsedStatementBundle:
+    statement_date: str
+    statement_product: str
+    account_numbers: List[str]
+    card_numbers: List[str]
+    parsed: dict
+    transaction_count: int
 
 
 def parse_scope(raw: Optional[list]) -> Scope:
@@ -292,6 +304,70 @@ def apply_transaction_read_scope(stmt, user: User):
     return stmt.where(or_(*scope_predicates))
 
 
+def build_parsed_statement_bundle(parsed: dict) -> ParsedStatementBundle:
+    account_numbers: Set[str] = set()
+    card_numbers: Set[str] = set()
+    transaction_count = 0
+    for acc in parsed.get("sub_accounts", []):
+        account_number = str(acc.get("account_number", "")).strip()
+        if account_number:
+            account_numbers.add(account_number)
+        for card in acc.get("cards", []):
+            card_number = str(card.get("card_number", "")).strip()
+            if card_number:
+                card_numbers.add(card_number)
+            transaction_count += len(card.get("transactions", []))
+
+    return ParsedStatementBundle(
+        statement_date=str(parsed.get("statement_date", "")),
+        statement_product=str(parsed.get("statement_product", "")),
+        account_numbers=sorted(account_numbers),
+        card_numbers=sorted(card_numbers),
+        parsed=parsed,
+        transaction_count=transaction_count,
+    )
+
+
+def update_statement_from_bundle(statement: Statement, bundle: ParsedStatementBundle) -> None:
+    statement.statement_date = bundle.statement_date
+    statement.statement_product = bundle.statement_product
+    statement.account_numbers_json = json.dumps(bundle.account_numbers)
+    statement.card_numbers_json = json.dumps(bundle.card_numbers)
+    statement.parsed_json = json.dumps(bundle.parsed, ensure_ascii=False)
+
+
+def add_transactions_from_bundle(db: Session, statement: Statement, bundle: ParsedStatementBundle) -> None:
+    for acc in bundle.parsed.get("sub_accounts", []):
+        account_number = acc["account_number"]
+        account_currency = acc["sub_account_currency"]
+        for card in acc.get("cards", []):
+            card_number = card["card_number"]
+            cardholder_name = card["cardholder_name"]
+            for tx in card.get("transactions", []):
+                row = Transaction(
+                    statement_id=statement.id,
+                    statement_product=bundle.statement_product,
+                    account_number=account_number,
+                    card_number=card_number,
+                    cardholder_name=cardholder_name,
+                    account_currency=account_currency,
+                    post_date=tx["post_date"],
+                    transaction_date=tx["transaction_date"],
+                    description=tx["description"],
+                    amount=float(tx["amount"]),
+                    signed_amount=float(tx["signed_amount"]),
+                    is_credit=bool(tx["is_credit"]),
+                    kind=tx["kind"],
+                    payment_method=tx.get("payment_method"),
+                    region_code_alpha2=tx.get("region_code_alpha2"),
+                    currency=tx["currency"],
+                    currency_amount=float(tx["currency_amount"]),
+                    exchange_rate=float(tx["exchange_rate"]) if tx.get("exchange_rate") is not None else None,
+                    notes_json=json.dumps(tx.get("notes", []), ensure_ascii=False),
+                )
+                db.add(row)
+
+
 def create_app() -> FastAPI:
     cfg = load_config()
 
@@ -312,6 +388,23 @@ def create_app() -> FastAPI:
     backfill_account_currency(engine)
 
     user_index = build_user_index(cfg)
+    rebuild_status_lock = threading.Lock()
+    rebuild_status = {
+        "job_id": 0,
+        "state": "idle",
+        "phase": "idle",
+        "requested_by": None,
+        "started_at": None,
+        "finished_at": None,
+        "total_statements": 0,
+        "processed_statements": 0,
+        "statements_rebuilt": 0,
+        "transactions_rebuilt": 0,
+        "current_statement_id": None,
+        "current_filename": None,
+        "message": "",
+        "error": None,
+    }
 
     app = FastAPI(title="Statement Management API", version="0.1.0")
     app.add_middleware(
@@ -340,6 +433,118 @@ def create_app() -> FastAPI:
         if user is None:
             raise HTTPException(status_code=401, detail="invalid token")
         return user
+
+    def snapshot_rebuild_status() -> dict:
+        with rebuild_status_lock:
+            return dict(rebuild_status)
+
+    def update_rebuild_status(**updates) -> dict:
+        with rebuild_status_lock:
+            rebuild_status.update(updates)
+            return dict(rebuild_status)
+
+    def is_rebuild_running() -> bool:
+        with rebuild_status_lock:
+            return rebuild_status["state"] == "running"
+
+    def rebuild_all_parsed_data(job_id: int, requested_by: str) -> None:
+        try:
+            with SessionLocal() as db:
+                statements = db.scalars(select(Statement).order_by(Statement.id.asc())).all()
+
+            total_statements = len(statements)
+            prepared_rows: List[tuple[int, ParsedStatementBundle]] = []
+            seen_accounts: Dict[tuple[str, str, str], int] = {}
+            total_transactions = 0
+
+            update_rebuild_status(
+                job_id=job_id,
+                state="running",
+                phase="parsing",
+                total_statements=total_statements,
+                processed_statements=0,
+                statements_rebuilt=0,
+                transactions_rebuilt=0,
+                current_statement_id=None,
+                current_filename=None,
+                message="Parsing stored statements",
+                error=None,
+            )
+
+            for idx, statement in enumerate(statements, start=1):
+                update_rebuild_status(
+                    current_statement_id=statement.id,
+                    current_filename=statement.original_filename,
+                    processed_statements=idx - 1,
+                    message=f"Parsing statement {idx}/{total_statements}",
+                )
+
+                stored_path = Path(statement.stored_path)
+                if not stored_path.exists():
+                    raise RuntimeError(
+                        f"stored PDF not found for statement #{statement.id}: {statement.stored_path}"
+                    )
+
+                parsed = parse_statement(stored_path)
+                bundle = build_parsed_statement_bundle(parsed)
+                for account_number in bundle.account_numbers:
+                    key = (bundle.statement_date, bundle.statement_product, account_number)
+                    existing_statement_id = seen_accounts.get(key)
+                    if existing_statement_id is not None and existing_statement_id != statement.id:
+                        raise RuntimeError(
+                            "duplicate statement detected during rebuild: "
+                            f"statement_date={bundle.statement_date}, "
+                            f"statement_product={bundle.statement_product}, "
+                            f"account_number={account_number}, "
+                            f"statement_ids={existing_statement_id},{statement.id}"
+                        )
+                    seen_accounts[key] = statement.id
+
+                prepared_rows.append((statement.id, bundle))
+                total_transactions += bundle.transaction_count
+
+            update_rebuild_status(
+                phase="writing",
+                processed_statements=total_statements,
+                current_statement_id=None,
+                current_filename=None,
+                message="Writing rebuilt statement and transaction data",
+            )
+
+            with SessionLocal() as db:
+                db.execute(delete(Transaction))
+                for statement_id, bundle in prepared_rows:
+                    statement = db.get(Statement, statement_id)
+                    if statement is None:
+                        raise RuntimeError(f"statement #{statement_id} disappeared during rebuild")
+                    update_statement_from_bundle(statement, bundle)
+                    add_transactions_from_bundle(db, statement, bundle)
+                db.commit()
+
+            update_rebuild_status(
+                state="completed",
+                phase="completed",
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                processed_statements=total_statements,
+                statements_rebuilt=total_statements,
+                transactions_rebuilt=total_transactions,
+                current_statement_id=None,
+                current_filename=None,
+                message=(
+                    f"Rebuilt {total_statements} statements and {total_transactions} transactions"
+                ),
+                error=None,
+            )
+        except Exception as exc:
+            update_rebuild_status(
+                state="failed",
+                phase="failed",
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                current_statement_id=None,
+                current_filename=None,
+                message="Database rebuild failed",
+                error=str(exc),
+            )
 
     @app.get("/api/health")
     def health() -> dict:
@@ -371,6 +576,8 @@ def create_app() -> FastAPI:
         db: Session = Depends(get_db),
     ) -> dict:
         ensure_admin(user)
+        if is_rebuild_running():
+            raise HTTPException(status_code=409, detail="database rebuild is in progress")
 
         if not file.filename.lower().endswith(".pdf"):
             raise HTTPException(status_code=400, detail="only PDF is supported")
@@ -392,22 +599,17 @@ def create_app() -> FastAPI:
             stored_path.unlink(missing_ok=True)
             raise HTTPException(status_code=400, detail=f"parse failed: {e}")
 
-        account_numbers: Set[str] = set()
-        card_numbers: Set[str] = set()
-        for acc in parsed.get("sub_accounts", []):
-            account_numbers.add(acc["account_number"])
-            for card in acc.get("cards", []):
-                card_numbers.add(card["card_number"])
+        bundle = build_parsed_statement_bundle(parsed)
 
         existing_rows = db.scalars(
             select(Statement).where(
-                Statement.statement_date == parsed.get("statement_date", ""),
-                Statement.statement_product == parsed.get("statement_product", ""),
+                Statement.statement_date == bundle.statement_date,
+                Statement.statement_product == bundle.statement_product,
             )
         ).all()
         for existing in existing_rows:
             existing_accounts = set(json.loads(existing.account_numbers_json))
-            duplicated_accounts = sorted(account_numbers.intersection(existing_accounts))
+            duplicated_accounts = sorted(set(bundle.account_numbers).intersection(existing_accounts))
             if duplicated_accounts:
                 stored_path.unlink(missing_ok=True)
                 raise HTTPException(
@@ -424,60 +626,67 @@ def create_app() -> FastAPI:
         st = Statement(
             original_filename=file.filename,
             stored_path=str(stored_path),
-            statement_date=parsed.get("statement_date", ""),
-            statement_product=parsed.get("statement_product", ""),
+            statement_date=bundle.statement_date,
+            statement_product=bundle.statement_product,
             uploaded_at=datetime.now(timezone.utc),
             uploaded_by=user.username,
-            account_numbers_json=json.dumps(sorted(account_numbers)),
-            card_numbers_json=json.dumps(sorted(card_numbers)),
-            parsed_json=json.dumps(parsed, ensure_ascii=False),
+            account_numbers_json=json.dumps(bundle.account_numbers),
+            card_numbers_json=json.dumps(bundle.card_numbers),
+            parsed_json=json.dumps(bundle.parsed, ensure_ascii=False),
         )
         db.add(st)
         db.flush()
-
-        for acc in parsed.get("sub_accounts", []):
-            account_number = acc["account_number"]
-            account_currency = acc["sub_account_currency"]
-            for card in acc.get("cards", []):
-                card_number = card["card_number"]
-                cardholder_name = card["cardholder_name"]
-                for tx in card.get("transactions", []):
-                    row = Transaction(
-                        statement_id=st.id,
-                        statement_product=st.statement_product,
-                        account_number=account_number,
-                        card_number=card_number,
-                        cardholder_name=cardholder_name,
-                        account_currency=account_currency,
-                        post_date=tx["post_date"],
-                        transaction_date=tx["transaction_date"],
-                        description=tx["description"],
-                        amount=float(tx["amount"]),
-                        signed_amount=float(tx["signed_amount"]),
-                        is_credit=bool(tx["is_credit"]),
-                        kind=tx["kind"],
-                        payment_method=tx.get("payment_method"),
-                        region_code_alpha2=tx.get("region_code_alpha2"),
-                        currency=tx["currency"],
-                        currency_amount=float(tx["currency_amount"]),
-                        exchange_rate=float(tx["exchange_rate"]) if tx.get("exchange_rate") is not None else None,
-                        notes_json=json.dumps(tx.get("notes", []), ensure_ascii=False),
-                    )
-                    db.add(row)
-
-        tx_count = sum(
-            len(card.get("transactions", []))
-            for acc in parsed.get("sub_accounts", [])
-            for card in acc.get("cards", [])
-        )
+        add_transactions_from_bundle(db, st, bundle)
         db.commit()
 
         return {
             "statement_id": st.id,
             "statement_date": st.statement_date,
             "statement_product": st.statement_product,
-            "transactions_count": tx_count,
+            "transactions_count": bundle.transaction_count,
         }
+
+    @app.get("/api/admin/rebuild_database")
+    def get_rebuild_database_status(user: User = Depends(get_current_user)) -> dict:
+        ensure_admin(user)
+        return snapshot_rebuild_status()
+
+    @app.post("/api/admin/rebuild_database", status_code=202)
+    def start_rebuild_database(user: User = Depends(get_current_user)) -> dict:
+        ensure_admin(user)
+
+        with rebuild_status_lock:
+            if rebuild_status["state"] == "running":
+                raise HTTPException(status_code=409, detail="database rebuild is already running")
+
+            next_job_id = int(rebuild_status["job_id"]) + 1
+            rebuild_status.update(
+                {
+                    "job_id": next_job_id,
+                    "state": "running",
+                    "phase": "queued",
+                    "requested_by": user.username,
+                    "started_at": datetime.now(timezone.utc).isoformat(),
+                    "finished_at": None,
+                    "total_statements": 0,
+                    "processed_statements": 0,
+                    "statements_rebuilt": 0,
+                    "transactions_rebuilt": 0,
+                    "current_statement_id": None,
+                    "current_filename": None,
+                    "message": "Rebuild queued",
+                    "error": None,
+                }
+            )
+            snapshot = dict(rebuild_status)
+
+        worker = threading.Thread(
+            target=rebuild_all_parsed_data,
+            args=(next_job_id, user.username),
+            daemon=True,
+        )
+        worker.start()
+        return snapshot
 
     @app.get("/api/statements")
     def list_statements(

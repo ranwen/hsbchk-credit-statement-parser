@@ -69,6 +69,10 @@ ALPHA2_RE = re.compile(r"^[A-Z]{2}$")
 ALPHA3_RE = re.compile(r"^[A-Z]{3}$")
 EXCHANGE_RATE_RE = re.compile(r"^\*EXCHANGE\s*RATE:\s*([0-9]+(?:\.[0-9]+)?)$", re.IGNORECASE)
 HEADER_DATE_TOKEN_RE = re.compile(r"(\d{2})\s*([A-Z]{3})\s*(\d{4})", re.IGNORECASE)
+KNOWN_NON_MERCHANT_TRANSACTION_RULES = (
+    (re.compile(r"^PAID BY AUTOPAY\s*-\s*THANK YOU$", re.IGNORECASE), "payment", True),
+    (re.compile(r"^IFS PAYMENT\s*-\s*THANK YOU$", re.IGNORECASE), "payment", True),
+)
 
 
 class ParseError(RuntimeError):
@@ -176,6 +180,28 @@ def split_description_details(
         raise ParseError(f"Merchant description became empty after parsing details at {context}")
 
     return description, region_code_alpha2, currency, currency_amount
+
+
+def classify_transaction_kind(
+    description: str, is_credit: bool, region_code_alpha2: Optional[str], context: str
+) -> str:
+    normalized_description = squeeze_ws(description)
+
+    if region_code_alpha2 is None:
+        for pattern, kind, requires_credit in KNOWN_NON_MERCHANT_TRANSACTION_RULES:
+            if pattern.fullmatch(normalized_description):
+                if requires_credit and not is_credit:
+                    raise ParseError(
+                        f"Known non-merchant transaction must be credit at {context}: {description!r}"
+                    )
+                return kind
+        raise ParseError(
+            f"Missing region code for unrecognized transaction at {context}: {description!r}"
+        )
+
+    if is_credit:
+        return "refund_or_credit"
+    return "purchase_or_charge"
 
 
 def parse_ddmon(token: str, statement_year: int, statement_month: int, context: str) -> str:
@@ -657,12 +683,12 @@ def parse_sub_account(account: SubAccount, stmt_year: int, stmt_month: int) -> N
                 if not cardholder_name:
                     raise ParseError(f"Missing cardholder name for {current_card_number} at {context}")
 
-                if is_credit and "PAID BY AUTOPAY" in description.upper():
-                    kind = "payment"
-                elif is_credit:
-                    kind = "refund_or_credit"
-                else:
-                    kind = "purchase_or_charge"
+                kind = classify_transaction_kind(
+                    description=description,
+                    is_credit=is_credit,
+                    region_code_alpha2=region_code_alpha2,
+                    context=context,
+                )
 
                 tx = Transaction(
                     post_date=post_date,

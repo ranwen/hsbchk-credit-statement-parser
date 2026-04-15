@@ -57,6 +57,7 @@ SUMMARY_CREDIT_RE = re.compile(r"^CREDIT/PAYMENT\s*:\s*([0-9][0-9,]*\.\d{2}(?:CR
 SUMMARY_PURCHASE_RE = re.compile(
     r"^PURCHASES AND INSTALMENTS\s*:\s*([0-9][0-9,]*\.\d{2})$"
 )
+SUMMARY_FEES_RE = re.compile(r"^ALL FEES AND CHARGES\s*:\s*([0-9][0-9,]*\.\d{2})$")
 SUMMARY_TOTAL_RE = re.compile(r"^TOTAL ACCOUNT BALANCE\s*:\s*([0-9][0-9,]*\.\d{2})$")
 CONTINUATION_RE = re.compile(
     r"^(?:APPLE\s*PAY-MOBILE:\d{4}|UNIONPAY\s*QR|\*EXCHANGE\s*RATE:\s*[0-9.]+)$",
@@ -72,6 +73,7 @@ HEADER_DATE_TOKEN_RE = re.compile(r"(\d{2})\s*([A-Z]{3})\s*(\d{4})", re.IGNORECA
 KNOWN_NON_MERCHANT_TRANSACTION_RULES = (
     (re.compile(r"^PAID BY AUTOPAY\s*-\s*THANK YOU$", re.IGNORECASE), "payment", True),
     (re.compile(r"^IFS PAYMENT\s*-\s*THANK YOU$", re.IGNORECASE), "payment", True),
+    (re.compile(r"^CARD ANNUAL FEE$", re.IGNORECASE), "fee", False),
 )
 
 
@@ -117,6 +119,7 @@ class SubAccount:
     statement_balance_summary: Optional[Decimal] = None
     summary_credit_payment: Optional[Decimal] = None
     summary_purchases_and_instalments: Optional[Decimal] = None
+    summary_fees_and_charges: Optional[Decimal] = None
     summary_total_account_balance: Optional[Decimal] = None
     transactions: List[Transaction] = field(default_factory=list)
 
@@ -188,11 +191,12 @@ def classify_transaction_kind(
     normalized_description = squeeze_ws(description)
 
     if region_code_alpha2 is None:
-        for pattern, kind, requires_credit in KNOWN_NON_MERCHANT_TRANSACTION_RULES:
+        for pattern, kind, expected_is_credit in KNOWN_NON_MERCHANT_TRANSACTION_RULES:
             if pattern.fullmatch(normalized_description):
-                if requires_credit and not is_credit:
+                if expected_is_credit is not None and expected_is_credit != is_credit:
+                    direction = "credit" if expected_is_credit else "debit"
                     raise ParseError(
-                        f"Known non-merchant transaction must be credit at {context}: {description!r}"
+                        f"Known non-merchant transaction must be {direction} at {context}: {description!r}"
                     )
                 return kind
         raise ParseError(
@@ -628,6 +632,20 @@ def parse_sub_account(account: SubAccount, stmt_year: int, stmt_month: int) -> N
                 last_tx = None
                 continue
 
+            m_fees = SUMMARY_FEES_RE.match(line)
+            if m_fees:
+                amount, _signed, is_credit = parse_money(m_fees.group(1), context)
+                if is_credit:
+                    raise ParseError(f"ALL FEES AND CHARGES cannot be CR at {context}")
+                account.summary_fees_and_charges = set_once_or_same(
+                    account.summary_fees_and_charges,
+                    amount,
+                    "summary_fees_and_charges",
+                    context,
+                )
+                last_tx = None
+                continue
+
             m_total = SUMMARY_TOTAL_RE.match(line)
             if m_total:
                 amount, _signed, is_credit = parse_money(m_total.group(1), context)
@@ -754,6 +772,8 @@ def parse_sub_account(account: SubAccount, stmt_year: int, stmt_month: int) -> N
                 raise ParseError(f"Malformed CREDIT/PAYMENT line at {context}: {line!r}")
             if line.startswith("PURCHASES AND INSTALMENTS"):
                 raise ParseError(f"Malformed PURCHASES/INSTALMENTS line at {context}: {line!r}")
+            if line.startswith("ALL FEES AND CHARGES"):
+                raise ParseError(f"Malformed ALL FEES AND CHARGES line at {context}: {line!r}")
             if line.startswith("TOTAL ACCOUNT BALANCE"):
                 raise ParseError(f"Malformed TOTAL ACCOUNT BALANCE line at {context}: {line!r}")
 
@@ -766,7 +786,15 @@ def validate_sub_account(account: SubAccount) -> None:
     base_currency = canonical_base_currency(account.amount_currency)
 
     credits = sum((tx.amount for tx in account.transactions if tx.is_credit), Decimal("0.00"))
-    debits = sum((tx.amount for tx in account.transactions if not tx.is_credit), Decimal("0.00"))
+    purchase_debits = sum(
+        (tx.amount for tx in account.transactions if not tx.is_credit and tx.kind != "fee"),
+        Decimal("0.00"),
+    )
+    fee_debits = sum(
+        (tx.amount for tx in account.transactions if not tx.is_credit and tx.kind == "fee"),
+        Decimal("0.00"),
+    )
+    debits = (purchase_debits + fee_debits).quantize(MONEY_Q, rounding=ROUND_HALF_UP)
     net = (account.previous_balance + debits - credits).quantize(MONEY_Q, rounding=ROUND_HALF_UP)
 
     for tx in account.transactions:
@@ -810,16 +838,28 @@ def validate_sub_account(account: SubAccount) -> None:
 
     if (
         account.summary_purchases_and_instalments is not None
-        and debits != account.summary_purchases_and_instalments
+        and purchase_debits != account.summary_purchases_and_instalments
     ):
         raise ParseError(
             f"Purchases summary mismatch for {account.account_number}: "
-            f"transactions={money_to_json(debits)} summary={money_to_json(account.summary_purchases_and_instalments)}"
+            f"transactions={money_to_json(purchase_debits)} "
+            f"summary={money_to_json(account.summary_purchases_and_instalments)}"
         )
-    if account.summary_purchases_and_instalments is None and debits != Decimal("0.00"):
+    if account.summary_purchases_and_instalments is None and purchase_debits != Decimal("0.00"):
         raise ParseError(
             f"Missing PURCHASES AND INSTALMENTS summary while debit transactions exist for "
-            f"{account.account_number}: {money_to_json(debits)}"
+            f"{account.account_number}: {money_to_json(purchase_debits)}"
+        )
+
+    if account.summary_fees_and_charges is not None and fee_debits != account.summary_fees_and_charges:
+        raise ParseError(
+            f"Fees summary mismatch for {account.account_number}: "
+            f"transactions={money_to_json(fee_debits)} summary={money_to_json(account.summary_fees_and_charges)}"
+        )
+    if account.summary_fees_and_charges is None and fee_debits != Decimal("0.00"):
+        raise ParseError(
+            f"Missing ALL FEES AND CHARGES summary while fee transactions exist for "
+            f"{account.account_number}: {money_to_json(fee_debits)}"
         )
 
     if (
@@ -920,6 +960,11 @@ def sub_account_to_json(account: SubAccount) -> dict:
             "purchases_and_instalments": (
                 money_to_json(account.summary_purchases_and_instalments)
                 if account.summary_purchases_and_instalments is not None
+                else None
+            ),
+            "fees_and_charges": (
+                money_to_json(account.summary_fees_and_charges)
+                if account.summary_fees_and_charges is not None
                 else None
             ),
             "total_account_balance": (

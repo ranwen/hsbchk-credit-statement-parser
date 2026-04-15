@@ -875,6 +875,7 @@ def create_app() -> FastAPI:
                     "spend": 0.0,
                     "refund": 0.0,
                     "payment": 0.0,
+                    "fee": 0.0,
                     "cards": {},
                 },
             )
@@ -882,7 +883,9 @@ def create_app() -> FastAPI:
                 acc["account_currency"] = tx.account_currency
 
             amount = float(tx.amount)
-            if not tx.is_credit:
+            if tx.kind == "fee":
+                acc["fee"] += amount
+            elif not tx.is_credit:
                 acc["spend"] += amount
             elif tx.kind == "payment":
                 acc["payment"] += amount
@@ -898,9 +901,12 @@ def create_app() -> FastAPI:
                     "spend": 0.0,
                     "refund": 0.0,
                     "payment": 0.0,
+                    "fee": 0.0,
                 },
             )
-            if not tx.is_credit:
+            if tx.kind == "fee":
+                card_entry["fee"] += amount
+            elif not tx.is_credit:
                 card_entry["spend"] += amount
             elif tx.kind == "payment":
                 card_entry["payment"] += amount
@@ -917,9 +923,12 @@ def create_app() -> FastAPI:
                     "spend": 0.0,
                     "refund": 0.0,
                     "payment": 0.0,
+                    "fee": 0.0,
                 },
             )
-            if not tx.is_credit:
+            if tx.kind == "fee":
+                flat_card["fee"] += amount
+            elif not tx.is_credit:
                 flat_card["spend"] += amount
             elif tx.kind == "payment":
                 flat_card["payment"] += amount
@@ -941,6 +950,7 @@ def create_app() -> FastAPI:
                         "refund": round(float(c["refund"]), 2),
                         "net_spend": round(float(c["spend"] - c["refund"]), 2),
                         "payment": round(float(c["payment"]), 2),
+                        "fee": round(float(c["fee"]), 2),
                     }
                 )
             accounts.append(
@@ -951,6 +961,7 @@ def create_app() -> FastAPI:
                     "refund": round(float(item["refund"]), 2),
                     "net_spend": round(float(item["spend"] - item["refund"]), 2),
                     "payment": round(float(item["payment"]), 2),
+                    "fee": round(float(item["fee"]), 2),
                     "cards": cards,
                 }
             )
@@ -965,6 +976,7 @@ def create_app() -> FastAPI:
                 "refund": round(float(item["refund"]), 2),
                 "net_spend": round(float(item["spend"] - item["refund"]), 2),
                 "payment": round(float(item["payment"]), 2),
+                "fee": round(float(item["fee"]), 2),
             }
             for _, item in sorted(card_map.items(), key=lambda kv: (kv[0][0], kv[0][1]))
         ]

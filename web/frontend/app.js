@@ -505,6 +505,7 @@ async function loadTransactions() {
       <td>${tx.id}</td>
       <td>${tx.statement_id}<br/>${tx.statement_product}</td>
       <td>${tx.post_date}</td>
+      <td>${tx.kind || ""}</td>
       <td>${tx.description}</td>
       <td>${tx.account_currency || ""} ${tx.signed_amount}</td>
       <td>${tx.currency} ${tx.currency_amount}</td>
@@ -558,17 +559,18 @@ async function loadSummary() {
     els.summaryAccountsBody.appendChild(tr);
   } else {
     for (const acc of accounts) {
-      const tr = document.createElement("tr");
-      tr.innerHTML = `
-        <td>${acc.account_number}</td>
-        <td>${acc.account_currency || ""}</td>
-        <td>${formatMoney(acc.spend)}</td>
-        <td>${formatMoney(acc.refund)}</td>
-        <td>${formatMoney(acc.net_spend)}</td>
-        <td>${formatMoney(acc.payment)}</td>
-      `;
-      els.summaryAccountsBody.appendChild(tr);
-    }
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${acc.account_number}</td>
+      <td>${acc.account_currency || ""}</td>
+      <td>${formatMoney(acc.spend)}</td>
+      <td>${formatMoney(acc.refund)}</td>
+      <td>${formatMoney(acc.net_spend)}</td>
+      <td>${formatMoney(acc.payment)}</td>
+      <td>${formatMoney(acc.fee)}</td>
+    `;
+    els.summaryAccountsBody.appendChild(tr);
+  }
   }
 
   const cards = data.cards || [];
@@ -578,19 +580,20 @@ async function loadSummary() {
     els.summaryCardsBody.appendChild(tr);
   } else {
     for (const card of cards) {
-      const tr = document.createElement("tr");
-      tr.innerHTML = `
-        <td>${card.account_number}</td>
-        <td>${card.card_number}</td>
-        <td>${card.cardholder_name || ""}</td>
-        <td>${card.account_currency || ""}</td>
-        <td>${formatMoney(card.spend)}</td>
-        <td>${formatMoney(card.refund)}</td>
-        <td>${formatMoney(card.net_spend)}</td>
-        <td>${formatMoney(card.payment)}</td>
-      `;
-      els.summaryCardsBody.appendChild(tr);
-    }
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${card.account_number}</td>
+      <td>${card.card_number}</td>
+      <td>${card.cardholder_name || ""}</td>
+      <td>${card.account_currency || ""}</td>
+      <td>${formatMoney(card.spend)}</td>
+      <td>${formatMoney(card.refund)}</td>
+      <td>${formatMoney(card.net_spend)}</td>
+      <td>${formatMoney(card.payment)}</td>
+      <td>${formatMoney(card.fee)}</td>
+    `;
+    els.summaryCardsBody.appendChild(tr);
+  }
   }
 }
 

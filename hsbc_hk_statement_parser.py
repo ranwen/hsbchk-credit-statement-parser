@@ -48,16 +48,23 @@ STATEMENT_DATE_RE = re.compile(r"Statement\s*date\s+(\d{2})\s+([A-Z]{3})\s+(\d{4
 CARD_NUMBER_ANYWHERE_RE = re.compile(r"(?<!\d)\d{4}(?:\s+\d{4}){3}(?!\d)")
 AMOUNT_HEADER_RE = re.compile(r"Amount\s*\((HKD|CNY|RMB)\)", re.IGNORECASE)
 CARD_HOLDER_RE = re.compile(r"^((?:\d{4}\s+){3}\d{4})\s+([A-Za-z][A-Za-z .,'()/-]{1,48})$")
+BOT_CARD_RE = re.compile(r"^BOT\s*((?:\d{4}\s*){4})$", re.IGNORECASE)
 PREVIOUS_BALANCE_RE = re.compile(r"^PREVIOUS BALANCE\s+([0-9][0-9,]*\.\d{2})$")
 TRANSACTION_RE = re.compile(
     r"^(\d{2}[A-Z]{3})\s+(\d{2}[A-Z]{3})\s+(.+?)\s+([0-9][0-9,]*\.\d{2}(?:CR)?)$"
 )
 STATEMENT_BALANCE_RE = re.compile(r"^STATEMENT BALANCE\s+([0-9][0-9,]*\.\d{2})$")
 SUMMARY_CREDIT_RE = re.compile(r"^CREDIT/PAYMENT\s*:\s*([0-9][0-9,]*\.\d{2}(?:CR)?)$")
+SUMMARY_CREDIT_ADJUSTMENT_RE = re.compile(
+    r"^CREDIT ADJUSTMENT\s*:\s*([0-9][0-9,]*\.\d{2}(?:CR)?)$"
+)
 SUMMARY_PURCHASE_RE = re.compile(
     r"^PURCHASES AND INSTALMENTS\s*:\s*([0-9][0-9,]*\.\d{2})$"
 )
-SUMMARY_FEES_RE = re.compile(r"^ALL FEES AND CHARGES\s*:\s*([0-9][0-9,]*\.\d{2})$")
+SUMMARY_FEES_RE = re.compile(
+    r"^(?:ALL FEES AND CHARGES\s*:|TOTAL FEES/CHARGES\(EXCLUDING FINANCE CHARGE\)\s*)"
+    r"\s*([0-9][0-9,]*\.\d{2}(?:CR)?)$"
+)
 SUMMARY_TOTAL_RE = re.compile(r"^TOTAL ACCOUNT BALANCE\s*:\s*([0-9][0-9,]*\.\d{2})$")
 CONTINUATION_RE = re.compile(
     r"^(?:APPLE\s*PAY-MOBILE:\d{4}|UNIONPAY\s*QR|\*EXCHANGE\s*RATE:\s*[0-9.]+)$",
@@ -74,6 +81,7 @@ KNOWN_NON_MERCHANT_TRANSACTION_RULES = (
     (re.compile(r"^PAID BY AUTOPAY\s*-\s*THANK YOU$", re.IGNORECASE), "payment", True),
     (re.compile(r"^IFS PAYMENT\s*-\s*THANK YOU$", re.IGNORECASE), "payment", True),
     (re.compile(r"^CARD ANNUAL FEE$", re.IGNORECASE), "fee", False),
+    (re.compile(r"^CARD ANNUAL FEE REV$", re.IGNORECASE), "fee", True),
 )
 
 
@@ -118,6 +126,7 @@ class SubAccount:
     previous_balance: Optional[Decimal] = None
     statement_balance_summary: Optional[Decimal] = None
     summary_credit_payment: Optional[Decimal] = None
+    summary_credit_adjustment: Optional[Decimal] = None
     summary_purchases_and_instalments: Optional[Decimal] = None
     summary_fees_and_charges: Optional[Decimal] = None
     summary_total_account_balance: Optional[Decimal] = None
@@ -618,6 +627,20 @@ def parse_sub_account(account: SubAccount, stmt_year: int, stmt_month: int) -> N
                 last_tx = None
                 continue
 
+            m_credit_adj = SUMMARY_CREDIT_ADJUSTMENT_RE.match(line)
+            if m_credit_adj:
+                amount, _signed, is_credit = parse_money(m_credit_adj.group(1), context)
+                if amount != Decimal("0.00") and not is_credit:
+                    raise ParseError(f"CREDIT ADJUSTMENT must be CR at {context}")
+                account.summary_credit_adjustment = set_once_or_same(
+                    account.summary_credit_adjustment,
+                    amount,
+                    "summary_credit_adjustment",
+                    context,
+                )
+                last_tx = None
+                continue
+
             m_pur = SUMMARY_PURCHASE_RE.match(line)
             if m_pur:
                 amount, _signed, is_credit = parse_money(m_pur.group(1), context)
@@ -635,11 +658,10 @@ def parse_sub_account(account: SubAccount, stmt_year: int, stmt_month: int) -> N
             m_fees = SUMMARY_FEES_RE.match(line)
             if m_fees:
                 amount, _signed, is_credit = parse_money(m_fees.group(1), context)
-                if is_credit:
-                    raise ParseError(f"ALL FEES AND CHARGES cannot be CR at {context}")
+                signed_amount = -amount if is_credit else amount
                 account.summary_fees_and_charges = set_once_or_same(
                     account.summary_fees_and_charges,
-                    amount,
+                    signed_amount,
                     "summary_fees_and_charges",
                     context,
                 )
@@ -674,15 +696,21 @@ def parse_sub_account(account: SubAccount, stmt_year: int, stmt_month: int) -> N
                             f"Cardholder name changed for {card_number}: {existing!r} vs {card_name!r} at {context}"
                         )
                     current_card_number = card_number
+                    if last_tx and last_tx.card_number in {"", card_number} and not last_tx.cardholder_name:
+                        last_tx.card_number = card_number
+                        last_tx.cardholder_name = card_name
                     last_tx = None
                     continue
+
+            m_bot_card = BOT_CARD_RE.match(line)
+            if m_bot_card and last_tx and last_tx.card_number == "":
+                last_tx.card_number = to_card_number(m_bot_card.group(1))
+                continue
 
             if re.match(r"^\d{2}[A-Z]{3}\b", line):
                 m_tx = TRANSACTION_RE.match(line)
                 if not m_tx:
                     raise ParseError(f"Transaction-like line could not be parsed at {context}: {line!r}")
-                if current_card_number is None:
-                    raise ParseError(f"Transaction before any cardholder header at {context}: {line!r}")
 
                 post_token, trans_token, description_raw, amount_raw = m_tx.groups()
                 amount, signed, is_credit = parse_money(amount_raw, context)
@@ -697,16 +725,19 @@ def parse_sub_account(account: SubAccount, stmt_year: int, stmt_month: int) -> N
                 tx_currency = tx_currency or base_currency
                 tx_currency_amount = tx_currency_amount or amount
 
-                cardholder_name = account.cards.get(current_card_number)
-                if not cardholder_name:
-                    raise ParseError(f"Missing cardholder name for {current_card_number} at {context}")
-
                 kind = classify_transaction_kind(
                     description=description,
                     is_credit=is_credit,
                     region_code_alpha2=region_code_alpha2,
                     context=context,
                 )
+                if current_card_number is None and kind not in {"fee"}:
+                    raise ParseError(f"Transaction before any cardholder header at {context}: {line!r}")
+
+                card_number_for_tx = current_card_number or ""
+                cardholder_name = account.cards.get(card_number_for_tx, "")
+                if current_card_number is not None and not cardholder_name:
+                    raise ParseError(f"Missing cardholder name for {current_card_number} at {context}")
 
                 tx = Transaction(
                     post_date=post_date,
@@ -716,7 +747,7 @@ def parse_sub_account(account: SubAccount, stmt_year: int, stmt_month: int) -> N
                     signed_amount=signed,
                     is_credit=is_credit,
                     kind=kind,
-                    card_number=current_card_number,
+                    card_number=card_number_for_tx,
                     cardholder_name=cardholder_name,
                     region_code_alpha2=region_code_alpha2,
                     currency=tx_currency,
@@ -770,12 +801,23 @@ def parse_sub_account(account: SubAccount, stmt_year: int, stmt_month: int) -> N
                 raise ParseError(f"Malformed statement balance line at {context}: {line!r}")
             if line.startswith("CREDIT/PAYMENT"):
                 raise ParseError(f"Malformed CREDIT/PAYMENT line at {context}: {line!r}")
+            if line.startswith("CREDIT ADJUSTMENT"):
+                raise ParseError(f"Malformed CREDIT ADJUSTMENT line at {context}: {line!r}")
             if line.startswith("PURCHASES AND INSTALMENTS"):
                 raise ParseError(f"Malformed PURCHASES/INSTALMENTS line at {context}: {line!r}")
             if line.startswith("ALL FEES AND CHARGES"):
                 raise ParseError(f"Malformed ALL FEES AND CHARGES line at {context}: {line!r}")
+            if line.startswith("TOTAL FEES/CHARGES"):
+                raise ParseError(f"Malformed TOTAL FEES/CHARGES line at {context}: {line!r}")
             if line.startswith("TOTAL ACCOUNT BALANCE"):
                 raise ParseError(f"Malformed TOTAL ACCOUNT BALANCE line at {context}: {line!r}")
+
+    for tx in account.transactions:
+        if not tx.card_number or not tx.cardholder_name:
+            raise ParseError(
+                f"Could not resolve cardholder for transaction {tx.post_date} "
+                f"{tx.description!r} in account {account.account_number}"
+            )
 
 
 def validate_sub_account(account: SubAccount) -> None:
@@ -786,6 +828,14 @@ def validate_sub_account(account: SubAccount) -> None:
     base_currency = canonical_base_currency(account.amount_currency)
 
     credits = sum((tx.amount for tx in account.transactions if tx.is_credit), Decimal("0.00"))
+    credit_payment = sum(
+        (tx.amount for tx in account.transactions if tx.is_credit and tx.kind != "fee"),
+        Decimal("0.00"),
+    )
+    credit_adjustments = sum(
+        (tx.amount for tx in account.transactions if tx.is_credit and tx.kind == "fee"),
+        Decimal("0.00"),
+    )
     purchase_debits = sum(
         (tx.amount for tx in account.transactions if not tx.is_credit and tx.kind != "fee"),
         Decimal("0.00"),
@@ -794,6 +844,7 @@ def validate_sub_account(account: SubAccount) -> None:
         (tx.amount for tx in account.transactions if not tx.is_credit and tx.kind == "fee"),
         Decimal("0.00"),
     )
+    fee_net = (fee_debits - credit_adjustments).quantize(MONEY_Q, rounding=ROUND_HALF_UP)
     debits = (purchase_debits + fee_debits).quantize(MONEY_Q, rounding=ROUND_HALF_UP)
     net = (account.previous_balance + debits - credits).quantize(MONEY_Q, rounding=ROUND_HALF_UP)
 
@@ -825,15 +876,30 @@ def validate_sub_account(account: SubAccount) -> None:
                 f"{tx.description!r} for account {account.account_number}"
             )
 
-    if account.summary_credit_payment is not None and credits != account.summary_credit_payment:
+    if account.summary_credit_payment is not None and credit_payment != account.summary_credit_payment:
         raise ParseError(
             f"Credit summary mismatch for {account.account_number}: "
-            f"transactions={money_to_json(credits)} summary={money_to_json(account.summary_credit_payment)}"
+            f"transactions={money_to_json(credit_payment)} summary={money_to_json(account.summary_credit_payment)}"
         )
-    if account.summary_credit_payment is None and credits != Decimal("0.00"):
+    if account.summary_credit_payment is None and credit_payment != Decimal("0.00"):
         raise ParseError(
             f"Missing CREDIT/PAYMENT summary while credit transactions exist for {account.account_number}: "
-            f"{money_to_json(credits)}"
+            f"{money_to_json(credit_payment)}"
+        )
+
+    if (
+        account.summary_credit_adjustment is not None
+        and credit_adjustments != account.summary_credit_adjustment
+    ):
+        raise ParseError(
+            f"Credit adjustment summary mismatch for {account.account_number}: "
+            f"transactions={money_to_json(credit_adjustments)} "
+            f"summary={money_to_json(account.summary_credit_adjustment)}"
+        )
+    if account.summary_credit_adjustment is None and credit_adjustments != Decimal("0.00"):
+        raise ParseError(
+            f"Missing CREDIT ADJUSTMENT summary while credit adjustment transactions exist for "
+            f"{account.account_number}: {money_to_json(credit_adjustments)}"
         )
 
     if (
@@ -851,15 +917,15 @@ def validate_sub_account(account: SubAccount) -> None:
             f"{account.account_number}: {money_to_json(purchase_debits)}"
         )
 
-    if account.summary_fees_and_charges is not None and fee_debits != account.summary_fees_and_charges:
+    if account.summary_fees_and_charges is not None and fee_net != account.summary_fees_and_charges:
         raise ParseError(
             f"Fees summary mismatch for {account.account_number}: "
-            f"transactions={money_to_json(fee_debits)} summary={money_to_json(account.summary_fees_and_charges)}"
+            f"transactions={money_to_json(fee_net)} summary={money_to_json(account.summary_fees_and_charges)}"
         )
-    if account.summary_fees_and_charges is None and fee_debits != Decimal("0.00"):
+    if account.summary_fees_and_charges is None and fee_net != Decimal("0.00"):
         raise ParseError(
             f"Missing ALL FEES AND CHARGES summary while fee transactions exist for "
-            f"{account.account_number}: {money_to_json(fee_debits)}"
+            f"{account.account_number}: {money_to_json(fee_net)}"
         )
 
     if (
@@ -955,6 +1021,11 @@ def sub_account_to_json(account: SubAccount) -> dict:
             "credit_payment": (
                 money_to_json(account.summary_credit_payment)
                 if account.summary_credit_payment is not None
+                else None
+            ),
+            "credit_adjustment": (
+                money_to_json(account.summary_credit_adjustment)
+                if account.summary_credit_adjustment is not None
                 else None
             ),
             "purchases_and_instalments": (

@@ -884,7 +884,7 @@ def create_app() -> FastAPI:
 
             amount = float(tx.amount)
             if tx.kind == "fee":
-                acc["fee"] += amount
+                acc["fee"] += float(tx.signed_amount)
             elif not tx.is_credit:
                 acc["spend"] += amount
             elif tx.kind == "payment":
@@ -905,7 +905,7 @@ def create_app() -> FastAPI:
                 },
             )
             if tx.kind == "fee":
-                card_entry["fee"] += amount
+                card_entry["fee"] += float(tx.signed_amount)
             elif not tx.is_credit:
                 card_entry["spend"] += amount
             elif tx.kind == "payment":
@@ -927,7 +927,7 @@ def create_app() -> FastAPI:
                 },
             )
             if tx.kind == "fee":
-                flat_card["fee"] += amount
+                flat_card["fee"] += float(tx.signed_amount)
             elif not tx.is_credit:
                 flat_card["spend"] += amount
             elif tx.kind == "payment":
